@@ -1,0 +1,6 @@
+Flask
+PyJWT
+python-dotenv
+SQLAlchemy
+mysql-connector-python
+werkzeug

@@ -60,6 +60,28 @@ def get_profile(current_user):
     return jsonify(user_data)
 
 
+@bp.route('/usuarios/<int:id_usuario>', methods=['GET'])
+@token_required
+def get_usuario_by_id(current_user, id_usuario):
+    """Obtém os dados de um usuário específico pelo seu ID."""
+    try:
+        with get_connection() as conn:
+            query = text("SELECT id_usuario, nome, email, genero, dt_nascimento, no_telefone FROM usuario WHERE id_usuario = :id_usuario")
+            result = conn.execute(query, {'id_usuario': id_usuario}).fetchone()
+
+        if not result:
+            return jsonify({'error': 'Usuário não encontrado.'}), 404
+
+        user_data = dict(result._mapping)
+        if user_data.get('dt_nascimento'):
+            user_data['dt_nascimento'] = str(user_data['dt_nascimento'])
+
+        return jsonify(user_data), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @bp.route('/profile', methods=['PUT'])
 @token_required
 def update_profile(current_user):

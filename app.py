@@ -14,7 +14,7 @@ from routes.partidas import bp as partidas_bp
 app = Flask(__name__)
 
 # Durante desenvolvimento permita a origem do Vite (ex: http://localhost:5173)
-CORS(app, resources={r"/*": {"origins": "http://localhost:8080"}}, supports_credentials=True)
+CORS(app, resources={r"/*": {"origins": ["http://localhost:8080", "https://5afefbfb-1d0f-4bb0-b284-829687bfeec9.lovableproject.com"]}}, supports_credentials=True)
 
 # Register blueprints
 app.register_blueprint(auth_bp)

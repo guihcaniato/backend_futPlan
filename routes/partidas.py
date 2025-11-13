@@ -209,6 +209,8 @@ def get_partidas(current_user):
                     a.dthr_fim,
                     l.nome AS nome_local,
                     u.nome AS nome_responsavel,
+                    p.placar_time_casa,
+                    p.placar_time_visitante,
                     (SELECT t.nome_time FROM time_partida tp JOIN time t ON tp.fk_time = t.id_time WHERE tp.fk_partida = p.id_partida AND tp.casa_visitante = 'C') AS time_casa,
                     (SELECT t.nome_time FROM time_partida tp JOIN time t ON tp.fk_time = t.id_time WHERE tp.fk_partida = p.id_partida AND tp.casa_visitante = 'V') AS time_visitante
                 FROM partida AS p
@@ -243,7 +245,8 @@ def get_partida_details(current_user, id_partida):
             query_partida = text(
                 """
                 SELECT 
-                    p.id_partida, a.dthr_ini, a.dthr_fim, l.nome AS nome_local, u.nome AS nome_responsavel,
+                    p.id_partida, p.fk_responsavel_partida, a.dthr_ini, a.dthr_fim, l.nome AS nome_local, u.nome AS nome_responsavel, 
+                    p.placar_time_casa, p.placar_time_visitante,
                     (SELECT t.id_time FROM time_partida tp JOIN time t ON tp.fk_time = t.id_time WHERE tp.fk_partida = p.id_partida AND tp.casa_visitante = 'C') AS id_time_casa,
                     (SELECT t.nome_time FROM time_partida tp JOIN time t ON tp.fk_time = t.id_time WHERE tp.fk_partida = p.id_partida AND tp.casa_visitante = 'C') AS nome_time_casa,
                     (SELECT t.id_time FROM time_partida tp JOIN time t ON tp.fk_time = t.id_time WHERE tp.fk_partida = p.id_partida AND tp.casa_visitante = 'V') AS id_time_visitante,
@@ -343,6 +346,49 @@ def get_presence_list(current_user, id_partida):
             presence_list = [dict(row._mapping) for row in result]
 
         return jsonify(presence_list)
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/partidas/<int:id_partida>/placar', methods=['PUT'])
+@token_required
+def register_score(current_user, id_partida):
+    data = request.get_json()
+    if not data or 'placar_time_casa' not in data or 'placar_time_visitante' not in data:
+        return jsonify({'error': "Os campos 'placar_time_casa' e 'placar_time_visitante' são obrigatórios."}), 400
+
+    try:
+        placar_casa = int(data['placar_time_casa'])
+        placar_visitante = int(data['placar_time_visitante'])
+        if placar_casa < 0 or placar_visitante < 0:
+            raise ValueError("Placar não pode ser negativo.")
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Os placares devem ser números inteiros não negativos.'}), 400
+
+    id_usuario_logado = current_user._mapping['id_usuario']
+
+    try:
+        with engine.begin() as conn:
+            query_get_partida = text("SELECT fk_responsavel_partida FROM partida WHERE id_partida = :id_partida")
+            partida_info = conn.execute(query_get_partida, {'id_partida': id_partida}).fetchone()
+
+            if not partida_info:
+                return jsonify({'error': 'Partida não encontrada.'}), 404
+
+            if partida_info._mapping['fk_responsavel_partida'] != id_usuario_logado:
+                return jsonify({'error': 'Acesso negado. Apenas quem agendou a partida pode registrar o placar.'}), 403
+
+            query_update_score = text(
+                """
+                UPDATE partida 
+                SET placar_time_casa = :placar_casa, placar_time_visitante = :placar_visitante
+                WHERE id_partida = :id_partida
+            """
+            )
+            conn.execute(query_update_score, {'placar_casa': placar_casa, 'placar_visitante': placar_visitante, 'id_partida': id_partida})
+
+        return jsonify({'message': 'Placar registrado com sucesso!'}), 200
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500

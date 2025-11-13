@@ -21,7 +21,7 @@ def create_time(current_user):
     id_responsavel = current_user._mapping["id_usuario"]
 
     try:
-        with engine.connect() as conn:
+        with engine.begin() as conn:  # Use .begin() para transação
             query = text(
                 """
                 INSERT INTO time (nome_time, fk_responsavel_time, cor_uniforme)
@@ -36,8 +36,16 @@ def create_time(current_user):
             }
 
             result = conn.execute(query, params)
-            conn.commit()
             novo_time_id = result.lastrowid
+
+            # Adiciona o capitão como primeiro membro do time
+            query_add_captain = text(
+                """
+                INSERT INTO time_membros (fk_usuario, fk_time)
+                VALUES (:fk_usuario, :fk_time)
+                """
+            )
+            conn.execute(query_add_captain, {"fk_usuario": id_responsavel, "fk_time": novo_time_id})
 
         return (
             jsonify(
@@ -331,6 +339,63 @@ def update_time(current_user, id_time):
             conn.execute(text(query_str), params)
 
             return jsonify({"message": "Time atualizado com sucesso."}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route('/times/<int:id_time>/membros/<int:id_usuario_membro>', methods=['PUT'])
+@token_required
+def update_member_shirt_number(current_user, id_time, id_usuario_membro):
+    """Atualiza o número da camisa de um membro do time. Apenas para o capitão."""
+    data = request.get_json()
+    if not data or 'numero_camisa' not in data:
+        return jsonify({"error": "O campo 'numero_camisa' é obrigatório."}), 400
+
+    numero_camisa = data['numero_camisa']
+    id_capitao_requisitante = current_user._mapping['id_usuario']
+
+    try:
+        with engine.begin() as conn:
+            # 1. Verificar se o requisitante é o capitão do time
+            query_check_owner = text("SELECT fk_responsavel_time FROM time WHERE id_time = :id_time")
+            time_info = conn.execute(query_check_owner, {"id_time": id_time}).fetchone()
+
+            if not time_info:
+                return jsonify({"error": "Time não encontrado."}), 404
+
+            if time_info._mapping['fk_responsavel_time'] != id_capitao_requisitante:
+                return jsonify({"error": "Acesso negado. Apenas o capitão pode alterar o número da camisa."}), 403
+
+            # 2. Verificar se o usuário a ser atualizado é membro do time
+            query_check_member = text("SELECT 1 FROM time_membros WHERE fk_time = :id_time AND fk_usuario = :id_usuario_membro")
+            is_member = conn.execute(query_check_member, {"id_time": id_time, "id_usuario_membro": id_usuario_membro}).fetchone()
+
+            if not is_member:
+                return jsonify({"error": "Usuário não é membro deste time."}), 404
+
+            # 3. Verificar se o número da camisa já está em uso por OUTRO membro
+            query_check_number = text(
+                """
+                SELECT 1 FROM time_membros 
+                WHERE fk_time = :id_time AND numero_camisa = :numero_camisa AND fk_usuario != :id_usuario_membro
+                """
+            )
+            camisa_ja_existe = conn.execute(
+                query_check_number,
+                {"id_time": id_time, "numero_camisa": numero_camisa, "id_usuario_membro": id_usuario_membro},
+            ).fetchone()
+
+            if camisa_ja_existe:
+                return jsonify({"error": f"A camisa número {numero_camisa} já está em uso neste time."}), 409
+
+            # 4. Atualizar o número da camisa
+            query_update = text(
+                "UPDATE time_membros SET numero_camisa = :numero_camisa WHERE fk_time = :id_time AND fk_usuario = :id_usuario_membro"
+            )
+            conn.execute(query_update, {"numero_camisa": numero_camisa, "id_time": id_time, "id_usuario_membro": id_usuario_membro})
+
+        return jsonify({"message": "Número da camisa atualizado com sucesso."}), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500

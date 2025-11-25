@@ -199,11 +199,12 @@ def create_partida(current_user):
 @bp.route('/partidas', methods=['GET'])
 @token_required
 def get_partidas(current_user):
+    id_usuario = current_user._mapping['id_usuario']
     try:
         with engine.connect() as conn:
             query = text(
                 """
-                SELECT 
+                SELECT DISTINCT
                     p.id_partida,
                     a.dthr_ini,
                     a.dthr_fim,
@@ -217,11 +218,18 @@ def get_partidas(current_user):
                 JOIN agendamento AS a ON p.fk_agendamento = a.id_agendamento
                 JOIN local AS l ON a.fk_local = l.id_local
                 JOIN usuario AS u ON p.fk_responsavel_partida = u.id_usuario
+                JOIN time_partida AS tp_match ON p.id_partida = tp_match.fk_partida
+                JOIN time AS t_match ON tp_match.fk_time = t_match.id_time
+                LEFT JOIN time_membros AS tm ON t_match.id_time = tm.fk_time
+                WHERE
+                    t_match.fk_responsavel_time = :id_usuario OR tm.fk_usuario = :id_usuario
                 ORDER BY a.dthr_ini ASC
             """
             )
 
-            result = conn.execute(query)
+            result = conn.execute(query, {
+                "id_usuario": id_usuario
+            })
             partidas = [
                 {
                     **row._mapping,
@@ -419,5 +427,134 @@ def cancel_partida(current_user, id_partida):
 
         return jsonify({'message': 'Partida cancelada com sucesso e horário liberado.'}), 200
 
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/partidas/eventos/tipos', methods=['GET'])
+@token_required
+def get_event_types(current_user):
+    """Retorna os tipos de eventos de partida disponíveis."""
+    try:
+        with engine.connect() as conn:
+            query = text("SELECT id_tp_evento, evento FROM tp_evento ORDER BY evento")
+            result = conn.execute(query)
+            event_types = [dict(row._mapping) for row in result]
+        return jsonify(event_types)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/partidas/<int:id_partida>/eventos', methods=['POST'])
+@token_required
+def add_match_event(current_user, id_partida):
+    """Adiciona um evento a uma partida (ex: gol, cartão)."""
+    data = request.get_json()
+    id_usuario_logado = current_user._mapping['id_usuario']
+
+    required_fields = ['fk_tp_evento', 'fk_usuario']
+    if not data or not all(key in data for key in required_fields):
+        return jsonify({'error': f"Campos obrigatórios: {required_fields}"}), 400
+
+    fk_tp_evento = data['fk_tp_evento']
+    fk_usuario = data['fk_usuario']
+    tempo_partida_evento = data.get('tempo_partida_evento')
+
+    try:
+        with engine.begin() as conn:
+            # 1. Verificar se quem requisita é o responsável pela partida
+            query_get_partida = text("SELECT fk_responsavel_partida FROM partida WHERE id_partida = :id_partida")
+            partida_info = conn.execute(query_get_partida, {'id_partida': id_partida}).fetchone()
+
+            if not partida_info:
+                return jsonify({'error': 'Partida não encontrada.'}), 404
+
+            if partida_info._mapping['fk_responsavel_partida'] != id_usuario_logado:
+                return jsonify({'error': 'Acesso negado. Apenas quem agendou a partida pode adicionar eventos.'}), 403
+
+            # 2. Verificar se o jogador pertence a um dos times da partida
+            query_check_player = text(
+                """
+                SELECT tm.fk_time FROM time_membros tm
+                JOIN time_partida tp ON tm.fk_time = tp.fk_time
+                WHERE tm.fk_usuario = :fk_usuario AND tp.fk_partida = :id_partida
+                UNION
+                SELECT t.id_time FROM time t
+                JOIN time_partida tp ON t.id_time = tp.fk_time
+                WHERE t.fk_responsavel_time = :fk_usuario AND tp.fk_partida = :id_partida
+                """
+            )
+            player_team = conn.execute(query_check_player, {'fk_usuario': fk_usuario, 'id_partida': id_partida}).fetchone()
+
+            if not player_team:
+                return jsonify({'error': 'Jogador inválido. O usuário não pertence a nenhum dos times desta partida.'}), 400
+
+            # 3. Inserir o evento
+            query_insert_event = text(
+                """
+                INSERT INTO evento_partida (fk_partida, fk_usuario, fk_tp_evento, tempo_partida_evento)
+                VALUES (:fk_partida, :fk_usuario, :fk_tp_evento, :tempo_partida_evento)
+                """
+            )
+            conn.execute(query_insert_event, {
+                'fk_partida': id_partida,
+                'fk_usuario': fk_usuario,
+                'fk_tp_evento': fk_tp_evento,
+                'tempo_partida_evento': tempo_partida_evento
+            })
+
+        return jsonify({'message': "Evento registrado com sucesso."}), 201
+
+    except IntegrityError as e:
+        # Captura erro de chave estrangeira, ex: fk_tp_evento não existe
+        if "foreign key constraint fails" in str(e.orig).lower():
+            return jsonify({'error': 'Tipo de evento (fk_tp_evento) inválido ou não encontrado.'}), 400
+        return jsonify({'error': 'Erro de integridade de dados.', 'details': str(e)}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/partidas/<int:id_partida>/eventos', methods=['GET'])
+@token_required
+def get_match_events(current_user, id_partida):
+    """Lista todos os eventos de uma partida específica."""
+    try:
+        with engine.connect() as conn:
+            # 1. Verificar se a partida existe
+            query_check_match = text("SELECT 1 FROM partida WHERE id_partida = :id_partida")
+            match_exists = conn.execute(query_check_match, {'id_partida': id_partida}).fetchone()
+
+            if not match_exists:
+                return jsonify({'error': 'Partida não encontrada.'}), 404
+
+            # 2. Buscar os eventos da partida
+            query_get_events = text(
+                """
+                SELECT 
+                    pe.id_evento_partida,
+                    pe.tempo_partida_evento,
+                    u.id_usuario,
+                    u.nome AS nome_jogador,
+                    tpe.evento AS tipo_evento,
+                    t.id_time,
+                    t.nome_time
+                FROM evento_partida AS pe
+                JOIN usuario AS u ON pe.fk_usuario = u.id_usuario
+                JOIN tp_evento AS tpe ON pe.fk_tp_evento = tpe.id_tp_evento
+                JOIN (
+                    SELECT tm.fk_usuario, tm.fk_time FROM time_membros tm
+                    UNION
+                    SELECT t.fk_responsavel_time, t.id_time FROM time t
+                ) AS jogadores_times ON pe.fk_usuario = jogadores_times.fk_usuario
+                JOIN time AS t ON jogadores_times.fk_time = t.id_time
+                JOIN time_partida AS tp ON t.id_time = tp.fk_time
+                WHERE pe.fk_partida = :id_partida AND tp.fk_partida = :id_partida
+                ORDER BY pe.tempo_partida_evento ASC
+                """
+            )
+            result = conn.execute(query_get_events, {'id_partida': id_partida})
+            events = [dict(row._mapping) for row in result]
+
+        return jsonify(events), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500

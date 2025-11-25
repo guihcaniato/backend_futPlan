@@ -19,6 +19,7 @@ def create_time(current_user):
     nome_time = data["nome_time"]
     cor_uniforme = data.get("cor_uniforme")
     id_responsavel = current_user._mapping["id_usuario"]
+    treinador_jogador = data["treinador_jogador"] if "treinador_jogador" in data else None
 
     try:
         with engine.begin() as conn:  # Use .begin() para transação
@@ -39,13 +40,14 @@ def create_time(current_user):
             novo_time_id = result.lastrowid
 
             # Adiciona o capitão como primeiro membro do time
-            query_add_captain = text(
-                """
-                INSERT INTO time_membros (fk_usuario, fk_time)
-                VALUES (:fk_usuario, :fk_time)
-                """
-            )
-            conn.execute(query_add_captain, {"fk_usuario": id_responsavel, "fk_time": novo_time_id})
+            if treinador_jogador:
+                query_add_captain = text(
+                    """
+                    INSERT INTO time_membros (fk_usuario, fk_time)
+                    VALUES (:fk_usuario, :fk_time)
+                    """
+                )
+                conn.execute(query_add_captain, {"fk_usuario": id_responsavel, "fk_time": novo_time_id})
 
         return (
             jsonify(
@@ -64,12 +66,13 @@ def create_time(current_user):
 @bp.route("/times", methods=["GET"])
 @token_required
 def get_times(current_user):
+    id_usuario = current_user._mapping['id_usuario']
     try:
         with engine.connect() as conn:
             query = text(
                 """
                 SELECT 
-                    t.id_time, 
+                    DISTINCT t.id_time, 
                     t.nome_time, 
                     t.cor_uniforme, 
                     u.nome AS nome_responsavel
@@ -77,14 +80,50 @@ def get_times(current_user):
                     time AS t
                 JOIN 
                     usuario AS u ON t.fk_responsavel_time = u.id_usuario
+                LEFT JOIN
+                    time_membros AS tm ON t.id_time = tm.fk_time
+                WHERE
+                    t.fk_responsavel_time = :id_usuario OR tm.fk_usuario = :id_usuario
             """
             )
 
-            result = conn.execute(query)
+            result = conn.execute(query, {"id_usuario": id_usuario})
             times = [dict(row._mapping) for row in result]
 
         return jsonify(times)
 
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route('/times/<int:id_time>', methods=['GET'])
+@token_required
+def get_time_by_id(current_user, id_time):
+    """Retorna os detalhes de um time específico."""
+    try:
+        with engine.connect() as conn:
+            query = text(
+                """
+                SELECT
+                    t.id_time,
+                    t.nome_time,
+                    t.cor_uniforme,
+                    t.fk_responsavel_time,
+                    u.nome AS nome_responsavel
+                FROM
+                    time AS t
+                JOIN
+                    usuario AS u ON t.fk_responsavel_time = u.id_usuario
+                WHERE
+                    t.id_time = :id_time
+            """
+            )
+            result = conn.execute(query, {"id_time": id_time}).fetchone()
+
+            if not result:
+                return jsonify({"error": "Time não encontrado."}), 404
+
+        return jsonify(dict(result._mapping))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
